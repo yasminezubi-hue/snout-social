@@ -32,11 +32,15 @@
   //                        && request.resource.data.email is string;
   //          allow read, update, delete: if false;
   //        }
+  //        match /counters/{counterId} {
+  //          allow read: if true;
+  //          allow write: if false;
+  //        }
   //      }
   //    }
 
   import { initializeApp } from "https://www.gstatic.com/firebasejs/11.2.0/firebase-app.js";
-  import { getFirestore, doc, setDoc, serverTimestamp } from "https://www.gstatic.com/firebasejs/11.2.0/firebase-firestore.js";
+  import { getFirestore, doc, setDoc, getDoc, serverTimestamp, runTransaction } from "https://www.gstatic.com/firebasejs/11.2.0/firebase-firestore.js";
 
   // ✅ FIREBASE CONFIG — CONNECTED
   const firebaseConfig = {
@@ -55,19 +59,65 @@
   // Make saveEmail available globally
   window.saveEmailToFirestore = async function(email, source) {
     try {
-      // Use email as document ID to prevent duplicates
       const docRef = doc(db, "waitlist", email.toLowerCase());
+      
+      // Check if already signed up
+      const existing = await getDoc(docRef).catch(() => null);
+      if (existing && existing.exists()) {
+        return { success: true, duplicate: true };
+      }
+
+      // Save email
       await setDoc(docRef, {
         email: email.toLowerCase(),
         signedUpAt: serverTimestamp(),
-        source: source, // 'hero' or 'cta' — tracks which form they used
+        source: source,
       });
+
+      // Increment counter using a transaction
+      const counterRef = doc(db, "counters", "waitlist");
+      try {
+        await runTransaction(db, async (transaction) => {
+          const counterDoc = await transaction.get(counterRef);
+          const newCount = (counterDoc.exists() ? counterDoc.data().count : 0) + 1;
+          transaction.set(counterRef, { count: newCount }, { merge: true });
+        });
+      } catch (e) {
+        console.log("Counter update failed (may need admin setup):", e);
+      }
+
       return { success: true };
     } catch (error) {
       console.error("Firestore error:", error);
       return { success: false, error: error.message };
     }
   };
+
+  // Load waitlist count on page load
+  window.loadWaitlistCount = async function() {
+    try {
+      const counterRef = doc(db, "counters", "waitlist");
+      const counterDoc = await getDoc(counterRef);
+      if (counterDoc.exists()) {
+        const count = counterDoc.data().count || 0;
+        const el = document.getElementById("waitlist-count");
+        const heroEl = document.getElementById("waitlist-count-hero");
+        if (el && count > 0) {
+          el.textContent = count.toLocaleString() + "+";
+        }
+        if (heroEl && count > 0) {
+          heroEl.textContent = count.toLocaleString() + "+";
+        }
+      }
+    } catch (e) {
+      console.log("Could not load waitlist count:", e);
+    }
+  };
+
+  // Auto-load count when page loads
+  window.addEventListener("DOMContentLoaded", () => {
+    if (window.loadWaitlistCount) window.loadWaitlistCount();
+  });
 </script>
 <style>
   :root {
@@ -326,6 +376,7 @@
     letter-spacing: -2px;
     margin-bottom: 24px;
     color: var(--deep-indigo);
+    overflow: visible;
   }
   .hero h1 em {
     font-style: italic;
@@ -333,6 +384,8 @@
     -webkit-background-clip: text;
     -webkit-text-fill-color: transparent;
     background-clip: text;
+    padding-right: 0.15em;
+    display: inline-block;
   }
   .hero-subtitle {
     font-size: 18px;
@@ -1115,7 +1168,7 @@
           <span>🐦</span>
           <span>🦎</span>
         </div>
-        <span><strong style="color: var(--deep-indigo);">2,400+</strong> pet parents already waiting</span>
+        <span><strong style="color: var(--deep-indigo);"><span id="waitlist-count-hero">Join</span></strong> pet parents already waiting</span>
       </div>
     </div>
 
@@ -1174,7 +1227,7 @@
 <section class="stats-bar">
   <div class="stats-inner">
     <div class="stat-item animate-on-scroll">
-      <div class="stat-number">2.4K+</div>
+      <div class="stat-number" id="waitlist-count">0</div>
       <div class="stat-label">Pet Parents Waiting</div>
     </div>
     <div class="stat-item animate-on-scroll">
@@ -1383,7 +1436,13 @@
         const result = await window.saveEmailToFirestore(email, source);
 
         if (result.success) {
-          showToastMsg(null, "You're on the list! We'll notify you at launch 🐾");
+          if (result.duplicate) {
+            showToastMsg(null, "You're already on the list! We'll be in touch 🐾");
+          } else {
+            showToastMsg(null, "You're on the list! We'll notify you at launch 🐾");
+            // Refresh the count
+            if (window.loadWaitlistCount) window.loadWaitlistCount();
+          }
           emailInput.value = '';
         } else {
           showToastMsg(null, "Hmm, something went wrong. Try again? 🐾");
